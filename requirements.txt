@@ -1,0 +1,14 @@
+openai==1.10.0
+langchain==0.1.1
+langchain-community==0.0.13
+langchain-core==0.1.15
+langchain-openai==0.0.3
+chainlit==1.0.100
+pypdf==3.17.4
+chromadb==0.4.0
+tiktoken==0.5.2
+python-dotenv==1.0.0
+# holidays==0.41
+# pysqlite3_binary==0.5.2.post3
+# psycopg2-binary
+pymongo==4.6.1
