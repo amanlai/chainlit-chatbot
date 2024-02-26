@@ -1,6 +1,7 @@
 import os
 import re
 from datetime import datetime
+from dotenv import load_dotenv
 
 import chainlit as cl
 from chainlit.server import app
@@ -10,12 +11,12 @@ from fastapi.responses import HTMLResponse
 
 
 from langchain_community.chat_models import ChatOpenAI
-# from langchain_community.vectorstores import Chroma
-# from langchain.prompts import ChatPromptTemplate#, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.agents import tool, AgentExecutor, create_openai_tools_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain.tools.retriever import create_retriever_tool
+# from langchain_community.vectorstores import Chroma
+# from langchain.prompts import ChatPromptTemplate#, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 # (from langchain.agents.agent_toolkits.conversational_retrieval.openai_functions 
 #  import create_conversational_retrieval_agent)
 # from langchain.chains import ConversationalRetrievalChain
@@ -23,7 +24,6 @@ from langchain.tools.retriever import create_retriever_tool
 # from langchain.agents.output_parsers import OpenAIFunctionsAgentOutputParser
 # from langchain_community.tools.convert_to_openai import format_tool_to_openai_function
 # from langchain_community.vectorstores import Chroma
-from dotenv import load_dotenv
 from lib.tools import get_tools
 from ingest import IngestData
 # import psycopg2
@@ -162,10 +162,8 @@ async def on_action(action):
 # App Hooks
 @cl.on_chat_start
 async def main():
-    """ Startup """
 
-    openai_key = await cl.AskUserMessage(content="OpenAI API Key:", timeout=10).send()
-    cl.user_session.set("OPENAI_API_KEY", openai_key)
+    """ Startup """
 
     response = await cl.AskActionMessage(
         content="Do you want to use previously uploaded file or do you want to a new file", 
@@ -178,12 +176,8 @@ async def main():
     # add data button widget
     if response:
 
-        api_key = cl.user_session.get("OPENAI_API_KEY")
-        data_processor = IngestData(
-            api_key=api_key if api_key else os.environ['OPENAI_API_KEY'],
-            database_type='faiss',
-        )
-        if response.get("value") == "new files":
+        data_processor = IngestData(database_type='faiss')
+        if response.get("value") == "new_file":
             vector_store = data_processor.build_embeddings()
         else:
             vector_store = data_processor.get_vector_store()
@@ -192,13 +186,12 @@ async def main():
 
 
     # wait for user question
-    await cl.Avatar(name=botname).send()
+    await cl.Avatar(name=botname, path="./public/logo_dark.png").send()
     await cl.Message(content=message_prompt, author=botname).send()
 
-    if 'chat_history' not in cl.user_session:
-        cl.user_session.set('chat_history', [])
-
+    cl.user_session.set('chat_history', [])
     create_agent(vector_store, temperature, system_message)
+
 
 @cl.on_message
 async def on_message(question):
@@ -208,7 +201,7 @@ async def on_message(question):
     agent_executor = cl.user_session.get('agent_executor')
 
     result = await agent_executor.ainvoke(
-        {"input": question, "chat_history": chat_history}
+        {"input": question.content, "chat_history": chat_history}
     )
 
     if verbose:
@@ -216,8 +209,11 @@ async def on_message(question):
         print(result)
 
     answer = result['output']
+    print("\n\n\n")
+    print(answer)
+    print("\n\n\n")
     answer = re.sub("^System: ", "", re.sub("^\\??\n\n", "", answer))
-    chat_history.extend((HumanMessage(content=question), AIMessage(content=answer)))
+    chat_history.extend((HumanMessage(content=question.content), AIMessage(content=answer)))
     cl.user_session.set('chat_history', chat_history)
 
     if verbose:

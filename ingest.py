@@ -2,7 +2,7 @@
 import os
 import glob
 # import boto3
-from multiprocessing import Pool
+# from multiprocessing import Pool
 from tqdm import tqdm
 from dotenv import load_dotenv
 import uuid
@@ -17,7 +17,6 @@ from chromadb.config import Settings
 load_dotenv()
 
 # Load environment variables
-os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY', 'dummy_key')
 persist_directory = os.environ.get("PERSIST_DIRECTORY", 'db')
 source_directory = os.environ.get("DOCUMENT_SOURCE_DIR", 'docs')
 verbose = os.environ.get("VERBOSE", 'True').lower() in ('true', '1', 't')
@@ -86,10 +85,12 @@ class IngestData:
 
 
 
-    def load_document(self, filename):
+    def load_document(self, source_dir):
         """
         Load PDF files as LangChain Documents
         """
+        filename = next(glob.iglob(os.path.join(source_dir, "**/*.pdf"), recursive=True))
+        
         ext = "." + filename.rsplit(".", 1)[-1]
         if ext != '.pdf':
             raise ValueError(f"Unsupported file extension '{ext}'")
@@ -103,20 +104,20 @@ class IngestData:
         return documents
     
 
-    def load_documents(self, source_dir, ignored_files=[]):
-        """
-        Loads all documents from the source documents directory, ignoring specified files
-        """
-        all_files = glob.glob(os.path.join(source_dir, "**/*.pdf"), recursive=True)
-        filtered_files = [file_path for file_path in all_files if file_path not in ignored_files]
+    # def load_documents(self, source_dir, ignored_files=[]):
+    #     """
+    #     Loads all documents from the source documents directory, ignoring specified files
+    #     """
+    #     all_files = glob.glob(os.path.join(source_dir, "**/*.pdf"), recursive=True)
+    #     filtered_files = [file_path for file_path in all_files if file_path not in ignored_files]
 
-        with Pool(processes=os.cpu_count()) as pool:
-            results = []
-            with tqdm(total=len(filtered_files), desc='Loading new documents', ncols=80) as pbar:
-                for docs in pool.imap_unordered(self.load_document, filtered_files):
-                    results.extend(docs)
-                    pbar.update()
-        return results
+    #     with Pool(processes=os.cpu_count()) as pool:
+    #         results = []
+    #         with tqdm(total=len(filtered_files), desc='Loading new documents', ncols=80) as pbar:
+    #             for docs in pool.imap_unordered(load_document, filtered_files):
+    #                 results.extend(docs)
+    #                 pbar.update()
+    #     return results
 
 
     def chunk_data(self):
@@ -124,7 +125,7 @@ class IngestData:
         Load the document, split it and return the chunks
         """
         # load document
-        documents = self.load_documents(source_directory)
+        documents = self.load_document(source_directory)
         if not documents:
             print("No new documents to load")
             exit(0)
@@ -233,7 +234,3 @@ class IngestData:
         for ext in ["faiss", "pkl"]:
             files = glob.glob(os.path.join(db_dir, f"**/*{ext}"), recursive=False)
             all_files.extend(files)
-
-
-
-
