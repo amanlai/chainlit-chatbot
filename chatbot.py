@@ -152,6 +152,11 @@ def create_agent(vector_store, temperature, system_message):
 
 
 
+@cl.action_callback("action_button")
+async def on_action(action):
+    print("The user clicked on the action button!")
+    return action
+
 
 
 # App Hooks
@@ -163,11 +168,11 @@ async def main():
     cl.user_session.set("OPENAI_API_KEY", openai_key)
 
     response = await cl.AskActionMessage(
-        content="Pick an action!",
+        content="Do you want to use previously uploaded file or do you want to a new file", 
         actions=[
-            cl.Action(name="continue", value="continue", label="✅ Continue"),
-            cl.Action(name="cancel", value="cancel", label="❌ Cancel"),
-        ],
+            cl.Action(name="Use previous file", value="old_file"),
+            cl.Action(name="Use new file", value="new_file")
+        ]
     ).send()
 
     # add data button widget
