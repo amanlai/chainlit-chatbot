@@ -176,7 +176,7 @@ class IngestData:
                     persist_directory=persist_directory, 
                 )
         else:
-            s3_bucket = None
+            # s3_bucket = None
             # if aws_enable:
             #     session = boto3.Session(
             #         aws_access_key_id=aws_access_key,
@@ -219,7 +219,6 @@ class IngestData:
     def fetch_aws_documents(self, source_dir, source_bucket):
 
         print("fetching aws documents")
-
         for s3_object in source_bucket.objects.all():
             path, filename = os.path.split(s3_object.key)
             if verbose:

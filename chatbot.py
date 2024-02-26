@@ -1,9 +1,14 @@
 import os
+import re
 from datetime import datetime
-from tempfile import NamedTemporaryFile
-# from functools import partial
-import streamlit as st
-from streamlit_chat import message
+
+import chainlit as cl
+from chainlit.server import app
+from fastapi import Request
+from fastapi.responses import HTMLResponse
+
+
+
 from langchain_community.chat_models import ChatOpenAI
 # from langchain_community.vectorstores import Chroma
 # from langchain.prompts import ChatPromptTemplate#, SystemMessagePromptTemplate, HumanMessagePromptTemplate
@@ -11,7 +16,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.agents import tool, AgentExecutor, create_openai_tools_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain.tools.retriever import create_retriever_tool
-# from langchain.agents.agent_toolkits.conversational_retrieval.openai_functions import create_conversational_retrieval_agent
+# (from langchain.agents.agent_toolkits.conversational_retrieval.openai_functions 
+#  import create_conversational_retrieval_agent)
 # from langchain.chains import ConversationalRetrievalChain
 # from langchain.agents.format_scratchpad import format_to_openai_function_messages
 # from langchain.agents.output_parsers import OpenAIFunctionsAgentOutputParser
@@ -25,94 +31,23 @@ import pymongo
 
 load_dotenv()
 
+# os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY', "dummy_key")
+
 persist_directory = os.environ.get("PERSIST_DIRECTORY", './db')
-MESSAGE_PROMPT = "Ask me anything!"
-SYSTEM_TEMPLATE = "You are a helpful bot. If you do not know the answer, just say that you do not know, do not try to make up an answer."
+SYSTEM_TEMPLATE = (
+    "You are a helpful bot. "
+    "If you do not know the answer, just say that you do not know, do not try to make up an answer."
+)
 os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY', 'dummy_key')
 model_name = os.environ.get("MODEL_NAME", 'gpt-3.5-turbo')
 use_client = os.environ.get("USE_CLIENT", 'True') == 'True'
 
-
-
-
-# # Initialize connection.
-# # Uses st.cache_resource to only run once.
-# @st.cache_resource
-# def init_connection():
-#     return pymongo.MongoClient(**st.secrets["mongo"])
-
-# print(st.secrets['mongo'])
-# client = init_connection()
-
-# # Pull data from the collection.
-# # Uses st.cache_data to only rerun when the query changes or after 10 min.
-# @st.cache_data(ttl=600)
-# def get_data():
-#     db = client.Hyatt_Mall
-#     items = db.hyatt_mall_data.find()
-#     items = list(items)  # make hashable for st.cache_data
-#     return items
-
-# items = get_data()
-
-# # Print results.
-# for item in items:
-#     st.write(f"{item['name']} has a :{item['pet']}:")
-
-
-uri = "mongodb+srv://amanlai:Qlj9UkaNwtrJxNlF@streamlit-chatbot.uyfl3sn.mongodb.net/?retryWrites=true&w=majority"
-# Create a new client and connect to the server
-client = pymongo.mongo_client.MongoClient(uri, server_api=pymongo.server_api.ServerApi('1'))
-# Send a ping to confirm a successful connection
-try:
-    client.admin.command('ping')
-    print("Pinged your deployment. You successfully connected to MongoDB!")
-except Exception as e:
-    print(e)
-
-
-############################################################
-##################### POSTGRES #############################
-############################################################
-
-# # Define database credentials here
-# DB_HOST = "db"
-# DB_PORT = 5432
-# DB_NAME = "chatbot_db"
-# DB_USER = "your_username"
-# DB_PASSWORD = "your_password"
-
-
-# def get_configuration_data(
-#         host=DB_HOST, 
-#         port=DB_PORT, 
-#         dbname=DB_NAME, 
-#         user=DB_USER, 
-#         password=DB_PASSWORD
-# ):
-#     try:
-#         conn = psycopg2.connect(
-#             host=host,
-#             port=port,
-#             dbname=dbname,
-#             user=user,
-#             password=password
-#         )
-#         cursor = conn.cursor()
-#         cursor.execute("SELECT query, answer FROM examples")
-#         rows = cursor.fetchall()
-#         examples = [{"query": question, "answer": answer} for (question, answer) in rows]
-#         cursor.close()
-#         conn.close()
-#         return examples
-#     except psycopg2.Error as e:
-#         raise Exception(f"Error connecting to the database: {e}")
- 
-
-
-# # Connect to the PostgreSQL database and retrieve examples
-# examples = get_configuration_data(DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)
-
+botname = os.environ.get("BOTNAME", "Personal Assistant")
+message_prompt = os.environ.get("MESSAGE_PROMPT", 'Ask me anything!')
+verbose = os.environ.get("VERBOSE", 'True') == 'True'
+stream = os.environ.get("STREAM", 'True') == 'True'
+system_message = os.environ.get("SYSTEM_MESSAGE", '')
+temperature = float(os.environ.get("TEMPERATURE", 0.0))
 
 
 
@@ -120,97 +55,70 @@ def build_tools(vector_store, k=5):
     """
     Creates the list of tools to be used by the Agent Executor
     """
-    retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": k})
+    retriever = vector_store.as_retriever(
+        search_type="similarity", 
+        search_kwargs={"k": k}
+    )
 
     retriever_tool = create_retriever_tool(
         retriever,
         "search_document",
-        """Searches and retrieves information from the vector store to answer questions whose answers can be found there.""",
+        """Searches and retrieves information from the vector store """
+        """to answer questions whose answers can be found there.""",
     )
 
-    st.session_state['tools'] = [*get_tools(), retriever_tool]
+    tools = [*get_tools(), retriever_tool]
+    return tools
 
 
-def build_data(uploaded_file, data_processor):
-    """
-    Process data on the sidebar
-    """
-    with st.spinner('Reading, splitting and embedding file...'):
+def create_agent(vector_store, temperature, system_message):
 
-        # writing the file from RAM to a temporary file that is deleted later
-        with NamedTemporaryFile(delete=False) as tmp:
-            # ext = os.path.splitext(uploaded_file.name)[1]
-            tmp.write(uploaded_file.read())
-            vector_store = data_processor.build_embeddings(tmp.name)
-            # vector_store = generate_index(tmp.name, api_key)
+    sys_msg = f"""You are a helpful assistant. 
+    Respond to the user as helpfully and accurately as possible.
 
-        os.remove(tmp.name)
-        st.success('File uploaded, chunked and embedded successfully.')
-        return vector_store
+    It is important that you provide an accurate answer. 
+    If you're not sure about the details of the query, don't provide an answer; 
+    ask follow-up questions to have a clear understanding.
 
+    Use the provided tools to perform calculations and lookups related to the 
+    calendar and datetime computations.
 
-def clear():
-    if os.environ['OPENAI_API_KEY'] == 'dummy_key':
-        os.environ['OPENAI_API_KEY'] = st.session_state['openai_key']
-        st.session_state['openai_key'] = ""
-
-
-
-def create_answer():
-
-    # creating a reply
-    question = st.session_state['question']
-    chat_history = st.session_state['chat_history']
-    agent_executor = st.session_state['agent_executor']
-
-    result = agent_executor.invoke({"input": question, "chat_history": chat_history})
-    answer = result['output']
-    st.session_state['chat_history'].extend((HumanMessage(content=question), AIMessage(content=answer)))
-    st.session_state['question'] = ""
-
-
-def create_agent(temperature, system_message):
-
-    sys_msg = f"""You are a helpful assistant. Respond to the user as helpfully and accurately as possible.
-
-    It is important that you provide an accurate answer. If you're not sure about the details of the query, don't provide an answer; ask follow-up questions to have a clear understanding.
-
-    Use the provided tools to perform calculations and lookups related to the calendar and datetime computations.
-
-    If you don't have enough context to answer question, you should ask user a follow-up question to get needed info. 
+    If you don't have enough context to answer question, 
+    you should ask user a follow-up question to get needed info. 
     
-    Always use tools if you have follow-up questions to the request or if there are questions related to datetime.
+    Always use tools if you have follow-up questions to the request or 
+    if there are questions related to datetime.
     
-    For example, given question: "What time will the restaurant open tomorrow?", follow the following steps to answer it:
+    For example, given question: "What time will the restaurant open tomorrow?", 
+    follow the following steps to answer it:
     
       1. Use get_day_of_week tool to find the week day name of tomorrow.
       2. Use search_document tool to see if the restaurant is open on that week day name.
-      3. The restaurant might be closed on specific dates such as a Christmas Day, therefore, use get_date tool to find calendar date of tomorrow.
+      3. The restaurant might be closed on specific dates such as a Christmas Day, 
+         therefore, use get_date tool to find calendar date of tomorrow.
       4. Use search_document tool to see if the restaurant is open on that date.
       5. Generate an answer if possible. If not, ask for clarifications.
     
 
-    Don't make any assumptions about data requests. For example, if dates are not specified, you ask follow up questions. 
+    Don't make any assumptions about data requests. 
+    For example, if dates are not specified, you ask follow up questions. 
     There are only two assumptions you can make about a query:
     
-      1. if the question is about dates but no year is given, you can assume that the year is {datetime.today().year}.
-      2. if the question includes a weekday, you can assume that the week is the calendar week that includes the date {datetime.today().strftime('%m-%d-%Y')}.
-
-    
+      1. if the question is about dates but no year is given, 
+         you can assume that the year is {datetime.today().year}.
+      2. if the question includes a weekday, you can assume that 
+         the week is the calendar week that includes the date {datetime.today().strftime('%m-%d-%Y')}.
 
     Dates should be in the format mm-dd-YYYY.
-
-    
     
     {system_message}
 
-
-    
-    If you can't find relevant information, instead of making up an answer, say "Let me connect you to my colleague".
+    If you can't find relevant information, instead of making up an answer, 
+    say "Let me connect you to my colleague".
     """
 
     llm = ChatOpenAI(model=model_name, temperature=temperature)
-    tools = st.session_state.pop('tools')
+    tools = build_tools(vector_store)
 
     # system_message = SystemMessage(content=sys_msg)
     # agent_executor = create_conversational_retrieval_agent(
@@ -233,93 +141,93 @@ def create_agent(temperature, system_message):
     agent_executor = AgentExecutor(
         agent=agent,
         tools=tools,
-        verbose=True,
+        verbose=verbose,
         max_iterations=10,
         handle_parsing_errors=True,
-        early_stopping_method = 'generate'
+        early_stopping_method = 'generate',
+        callbacks=[cl.AsyncLangchainCallbackHandler(stream_final_answer=stream)]
     )
-    
-    st.session_state['agent_executor'] = agent_executor
+    cl.user_session.set('agent_executor', agent_executor)
 
 
 
 
 
 
-def main():
+# App Hooks
+@cl.on_chat_start
+async def main():
+    """ Startup """
 
-    # side bar
-    with st.sidebar:
-        # delete chat history
-        reset_chat = st.button("Start a new thread")
-        if reset_chat:
-            st.session_state['chat_history'] = []
+    openai_key = await cl.AskUserMessage(content="OpenAI API Key:", timeout=10).send()
+    cl.user_session.set("OPENAI_API_KEY", openai_key)
 
-        st.text_input('OpenAI API Key:', type='password', key='openai_key', on_change=clear)
-        # api_key = True
-        # get any additional system message
-        system_message = st.text_input('System Message:')
-        # get the LLM model temperature
-        temperature = st.number_input('Temperature:', min_value=0., max_value=1., value=0.1)
-        # file uploader widget
-        col1, col2 = st.columns(2)
-        with col1:
-            uploaded_file = st.file_uploader('Upload a file:', type='pdf')
-        with col2:
-            for _ in range(10):
-                st.write('')
-            use_previously_saved_vector_store = st.checkbox('Use Previous File')
+    response = await cl.AskActionMessage(
+        content="Pick an action!",
+        actions=[
+            cl.Action(name="continue", value="continue", label="✅ Continue"),
+            cl.Action(name="cancel", value="cancel", label="❌ Cancel"),
+        ],
+    ).send()
 
-        # add data button widget
-        add_data = st.button('Add Data')
-        # TODO: the uploaded file name is used as the collection name
-        if uploaded_file:
-            collection_name = 'chroma'
-            # collection_name = os.path.splitext(uploaded_file.name)[0].replace(" ", "")
+    # add data button widget
+    if response:
+
+        api_key = cl.user_session.get("OPENAI_API_KEY")
+        data_processor = IngestData(
+            api_key=api_key if api_key else os.environ['OPENAI_API_KEY'],
+            database_type='faiss',
+        )
+        if response.get("value") == "new files":
+            vector_store = data_processor.build_embeddings()
         else:
-            collection_name = 'chroma'
-        if add_data:
-            data_processor = IngestData(
-                api_key=os.environ['OPENAI_API_KEY'],
-                collection_name=collection_name,
-            )
-            if uploaded_file: # if the user browsed a file
-                vector_store = build_data(uploaded_file, data_processor)
-            elif use_previously_saved_vector_store:
-                vector_store = data_processor.get_vector_store()
-            else:
-                msg = "must either upload a file or click the button to use existing data"
-                st.write(msg)
-                raise ValueError(msg)
-            # saving the vector store in the streamlit session state (to be persistent between reruns)
-            st.session_state['vector_store'] = vector_store
-            build_tools(vector_store)
-            create_agent(temperature, system_message)
+            vector_store = data_processor.get_vector_store()
+        # saving the vector store in the streamlit session state (to be persistent between reruns)
+        cl.user_session.set('vector_store', vector_store)
 
 
+    # wait for user question
+    await cl.Avatar(name=botname).send()
+    await cl.Message(content=message_prompt, author=botname).send()
 
-    # main page
-    st.subheader('Your Chat Assistant')
-    
-    if 'chat_history' not in st.session_state:
-        st.session_state['chat_history'] = []
+    if 'chat_history' not in cl.user_session:
+        cl.user_session.set('chat_history', [])
 
-    if 'vector_store' in st.session_state:
-        # displaying the chat history
-        message("How may I assist you today?", is_user=False, key='🤖') # bot welcome text
-        if 'chat_history' in st.session_state:
-            for i, msg in enumerate(st.session_state['chat_history']):
-                if i % 2 == 0:
-                    message(msg.content, is_user=True, key=f'{i} 🤓')    # user's question
-                else:
-                    message(msg.content, is_user=False, key=f'{i} 🤖') # bot response
-            
-        # take question
-        st.text_input('Ask a question related to the document', on_change=create_answer, key='question')
+    create_agent(vector_store, temperature, system_message)
 
+@cl.on_message
+async def on_message(question):
 
+    # creating a reply
+    chat_history = cl.user_session.get('chat_history')
+    agent_executor = cl.user_session.get('agent_executor')
 
+    result = await agent_executor.ainvoke(
+        {"input": question, "chat_history": chat_history}
+    )
 
+    if verbose:
+        print("This is the result of the chain:")
+        print(result)
 
-if __name__ == '__main__':
-    main()
+    answer = result['output']
+    answer = re.sub("^System: ", "", re.sub("^\\??\n\n", "", answer))
+    chat_history.extend((HumanMessage(content=question), AIMessage(content=answer)))
+    cl.user_session.set('chat_history', chat_history)
+
+    if verbose:
+        print("main")
+        print(f"result: {answer}")
+
+        await cl.Message(
+        content=answer, 
+        #elements=process_response(res), 
+        author=botname
+    ).send()
+
+# Custom Endpoints
+@app.get("/botname")
+def get_botname(request:Request):
+    if verbose:
+        print(f"calling botname: {botname}")
+    return HTMLResponse(botname)
