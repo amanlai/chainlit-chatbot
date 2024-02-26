@@ -161,7 +161,8 @@ cython_debug/
 old_ingest.py
 old_app.py
 docs/*.pdf
-
+db/*
+!db/.keep
 
 action.yml
 .dockerignore
