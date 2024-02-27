@@ -7,7 +7,8 @@ import chainlit as cl
 from chainlit.server import app
 from fastapi import Request
 from fastapi.responses import HTMLResponse
-
+import pymongo
+import certifi
 
 
 from langchain_community.chat_models import ChatOpenAI
@@ -26,30 +27,63 @@ from langchain.tools.retriever import create_retriever_tool
 # from langchain_community.vectorstores import Chroma
 from lib.tools import get_tools
 from ingest import IngestData
-# import psycopg2
-import pymongo
+
 
 load_dotenv()
 
-# os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY', "dummy_key")
-
-persist_directory = os.environ.get("PERSIST_DIRECTORY", './db')
-SYSTEM_TEMPLATE = (
-    "You are a helpful bot. "
-    "If you do not know the answer, just say that you do not know, do not try to make up an answer."
-)
+# persist_directory = os.environ.get("PERSIST_DIRECTORY", './db')
+# SYSTEM_TEMPLATE = (
+#     "You are a helpful bot. "
+#     "If you do not know the answer, just say that you do not know, do not try to make up an answer."
+# )
 os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY', 'dummy_key')
 model_name = os.environ.get("MODEL_NAME", 'gpt-3.5-turbo')
 use_client = os.environ.get("USE_CLIENT", 'True') == 'True'
 
 botname = os.environ.get("BOTNAME", "Personal Assistant")
-message_prompt = os.environ.get("MESSAGE_PROMPT", 'Ask me anything!')
 verbose = os.environ.get("VERBOSE", 'True') == 'True'
 stream = os.environ.get("STREAM", 'True') == 'True'
-system_message = os.environ.get("SYSTEM_MESSAGE", '')
-temperature = float(os.environ.get("TEMPERATURE", 0.0))
+mongo_uri = os.environ['MONGO_URI']
 
 
+##########################################################
+############### MONGODB CONNECTION #######################
+##########################################################
+
+def init_connection():
+    try:
+        mongo_client = pymongo.MongoClient(
+            mongo_uri, 
+            server_api=pymongo.server_api.ServerApi('1'), 
+            tlsCAFile=certifi.where()
+        )
+        db = mongo_client['chattabot']
+        collection = db['data']
+        print("Connection to MongoDB successful")
+    except pymongo.errors.ConnectionFailure as e:
+        print(f"Connection failed: {e}")
+        return
+    return collection
+
+
+def ingest_into_collection(collection, business_name, data):
+    """
+    Ingest data into MongoDB
+    """
+    collection.insert_one({"_id": business_name, **data})
+
+
+def get_data_from_collection(collection, business_name):
+    """
+    Get dictionary of attributes from MongoDB
+    """
+    data = next(collection.find({'_id': business_name}))
+    return data
+
+
+##########################################################
+############ AGENT AND TOOL DEFINITION ###################
+##########################################################
 
 def build_tools(vector_store, k=5):
     """
@@ -150,13 +184,14 @@ def create_agent(vector_store, temperature, system_message):
     cl.user_session.set('agent_executor', agent_executor)
 
 
-
+##########################################################
+############## CHAINLIT APP DEFINITION ###################
+##########################################################
 
 @cl.action_callback("action_button")
 async def on_action(action):
     print("The user clicked on the action button!")
     return action
-
 
 
 # App Hooks
@@ -166,10 +201,28 @@ async def main():
     """ Startup """
 
     response = await cl.AskActionMessage(
-        content="Do you want to use previously uploaded file or do you want to a new file", 
+        content="Do you want to use previously uploaded file or do you want to a new file?", 
         actions=[
             cl.Action(name="Use previous file", value="old_file"),
             cl.Action(name="Use new file", value="new_file")
+        ]
+    ).send()
+
+    bus_res = await cl.AskUserMessage(
+        content="Which business are you going to ask about today?", 
+    ).send()
+
+    try:
+        business_name = bus_res.get('output')
+    except KeyError:
+        cl.Text("must supply business name")
+
+
+    db_res = await cl.AskActionMessage(
+        content="Do you want to use previous configurations or do you want to create a new one?", 
+        actions=[
+            cl.Action(name="Use previous configurations", value="old_config"),
+            cl.Action(name="Create new configurations", value="new_config")
         ]
     ).send()
 
@@ -183,6 +236,22 @@ async def main():
             vector_store = data_processor.get_vector_store()
         # saving the vector store in the streamlit session state (to be persistent between reruns)
         cl.user_session.set('vector_store', vector_store)
+    
+    if db_res:
+        collection = init_connection()
+        if db_res.get("value") == "new_config":
+            data = {
+                "message_prompt": 'Ask me anything!',
+                "system_message": "",
+                "temperature": 0,
+                "training_data": ""
+            }
+            ingest_into_collection(collection, business_name, data)
+        else:
+            data = get_data_from_collection(collection, business_name)
+            message_prompt = data.get("message_prompt", 'Ask me anything!')
+            system_message = data.get("system_message", "")
+            temperature = data.get("system_message", 0)
 
 
     # wait for user question
@@ -192,6 +261,11 @@ async def main():
     cl.user_session.set('chat_history', [])
     create_agent(vector_store, temperature, system_message)
 
+
+
+##########################################################
+########### CREATING A REPLY TO A QUESTION ###############
+##########################################################
 
 @cl.on_message
 async def on_message(question):
@@ -213,7 +287,9 @@ async def on_message(question):
     print(answer)
     print("\n\n\n")
     answer = re.sub("^System: ", "", re.sub("^\\??\n\n", "", answer))
-    chat_history.extend((HumanMessage(content=question.content), AIMessage(content=answer)))
+    chat_history.extend(
+        (HumanMessage(content=question.content), AIMessage(content=answer))
+    )
     cl.user_session.set('chat_history', chat_history)
 
     if verbose:
@@ -225,6 +301,7 @@ async def on_message(question):
         #elements=process_response(res), 
         author=botname
     ).send()
+
 
 # Custom Endpoints
 @app.get("/botname")

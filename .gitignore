@@ -163,9 +163,4 @@ old_app.py
 docs/*.pdf
 db/*
 !db/.keep
-
-action.yml
-.dockerignore
-deployment.yaml
-Dockerfile
-run.sh
+New Folder/
