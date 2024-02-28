@@ -1,5 +1,7 @@
 import os
 import re
+import io
+import zipfile
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -31,12 +33,17 @@ from ingest import IngestData
 
 load_dotenv()
 
-# persist_directory = os.environ.get("PERSIST_DIRECTORY", './db')
 # SYSTEM_TEMPLATE = (
 #     "You are a helpful bot. "
 #     "If you do not know the answer, just say that you do not know, do not try to make up an answer."
 # )
+persist_directory = os.environ.get("PERSIST_DIRECTORY", 'db')
+source_directory = os.environ.get("DOCUMENT_SOURCE_DIR", 'docs')
+
+database_type = 'faiss'
+
 os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY', 'dummy_key')
+
 model_name = os.environ.get("MODEL_NAME", 'gpt-3.5-turbo')
 use_client = os.environ.get("USE_CLIENT", 'True') == 'True'
 
@@ -70,15 +77,45 @@ def ingest_into_collection(collection, business_name, data):
     """
     Ingest data into MongoDB
     """
+    collection.delete_one({'_id': business_name})
     collection.insert_one({"_id": business_name, **data})
 
 
-def get_data_from_collection(collection, business_name):
+def update_collection(collection, business_name, data):
     """
-    Get dictionary of attributes from MongoDB
+    Update certain key-value pairs in documents in a collection
     """
+    collection.update_one(
+        {'_id': business_name}, 
+        {"$set": data}
+    )
+
+
+def copy_from_collection(
+        data_processor, 
+        collection, 
+        business_name, 
+        old_config=False
+):
+    # get dictionary of attributes from MongoDB
     data = next(collection.find({'_id': business_name}))
-    return data
+    # read the archived index files from mongodb into a binary stream
+    index_files = io.BytesIO(data.get("index_files"))
+    # extract the index files into the persist directory
+    with zipfile.ZipFile(index_files) as zip_file:
+        zip_file.extractall(persist_directory)
+    # now that we have the index files stored in persist directory
+    # we can get the vector stores from them
+    vector_store = data_processor.get_vector_store()
+    if old_config:
+        message_prompt = data.get("message_prompt", 'Ask me anything!')
+        system_message = data.get("system_message", "")
+        temperature = data.get("temperature", 0)
+        return vector_store, message_prompt, system_message, temperature
+    else:
+        return vector_store
+
+
 
 
 ##########################################################
@@ -200,6 +237,11 @@ async def main():
 
     """ Startup """
 
+    message_prompt = "Ask me anything!"
+    system_message = ""
+    temperature = 0
+
+    # process file ingestion
     response = await cl.AskActionMessage(
         content="Do you want to use previously uploaded file or do you want to a new file?", 
         actions=[
@@ -208,6 +250,25 @@ async def main():
         ]
     ).send()
 
+    # process the response
+    if response:
+        # instantialize data ingester / getter
+        data_processor = IngestData(database_type=database_type)
+        vector_store = None
+
+        if response.get("value") == "new_file":
+
+            files = None
+            # Wait for the user to upload a file
+            while files is None:
+                files = await cl.AskFileMessage(
+                    content="Please upload a pdf file!", accept=["application/pdf"]
+                ).send()
+
+            pdf_file = files[0].path
+            vector_store = data_processor.build_embeddings(pdf_file)
+
+    # process business type
     bus_res = await cl.AskUserMessage(
         content="Which business are you going to ask about today?", 
     ).send()
@@ -226,33 +287,39 @@ async def main():
         ]
     ).send()
 
-    # add data button widget
-    if response:
-
-        data_processor = IngestData(database_type='faiss')
-        if response.get("value") == "new_file":
-            vector_store = data_processor.build_embeddings()
-        else:
-            vector_store = data_processor.get_vector_store()
-        # saving the vector store in the streamlit session state (to be persistent between reruns)
-        cl.user_session.set('vector_store', vector_store)
-    
     if db_res:
+        # initiate mongodb connection
         collection = init_connection()
-        if db_res.get("value") == "new_config":
-            data = {
-                "message_prompt": 'Ask me anything!',
-                "system_message": "",
-                "temperature": 0,
-                "training_data": ""
-            }
-            ingest_into_collection(collection, business_name, data)
-        else:
-            data = get_data_from_collection(collection, business_name)
-            message_prompt = data.get("message_prompt", 'Ask me anything!')
-            system_message = data.get("system_message", "")
-            temperature = data.get("system_message", 0)
+        # path to archived index files
+        path = os.path.join(source_directory, "index_files.zip")
 
+        if db_res.get("value") == "new_config":
+            # if beginning from scratch
+            data = {
+                "message_prompt": message_prompt,
+                "system_message": system_message,
+                "temperature": temperature,
+            }
+            try:
+                # save the archived index files into mongodb
+                with open(path, 'rb') as f:
+                    index_files = f.read()
+                os.remove(path)
+                # add the index files into the basic configuration
+                data |= {"index_files": index_files}
+                ingest_into_collection(collection, business_name, data)
+            except FileNotFoundError:
+                update_collection(collection, business_name, data)
+                vector_store = copy_from_collection(data_processor, collection, business_name)
+        else:
+            if vector_store is None:
+                tpl = copy_from_collection(data_processor, collection, business_name, old_config=True)
+                vector_store, message_prompt, system_message, temperature = tpl
+            else:
+                ValueError("New files do not have previous configurations.")
+
+    # saving the vector store in the streamlit session state (to be persistent between reruns)
+    cl.user_session.set('vector_store', vector_store)
 
     # wait for user question
     await cl.Avatar(name=botname, path="./public/logo_dark.png").send()

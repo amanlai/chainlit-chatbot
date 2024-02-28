@@ -1,6 +1,7 @@
 #! ../venv/Scripts/python.exe
 import os
 import glob
+import shutil
 # import boto3
 # from multiprocessing import Pool
 from tqdm import tqdm
@@ -85,11 +86,11 @@ class IngestData:
 
 
 
-    def load_document(self, source_dir):
+    def load_document(self, filename):
         """
         Load PDF files as LangChain Documents
         """
-        filename = next(glob.iglob(os.path.join(source_dir, "**/*.pdf"), recursive=True))
+        # filename = next(glob.iglob(os.path.join(source_dir, "**/*.pdf"), recursive=True))
         
         ext = "." + filename.rsplit(".", 1)[-1]
         if ext != '.pdf':
@@ -120,12 +121,12 @@ class IngestData:
     #     return results
 
 
-    def chunk_data(self):
+    def chunk_data(self, filename):
         """
         Load the document, split it and return the chunks
         """
         # load document
-        documents = self.load_document(source_directory)
+        documents = self.load_document(filename)
         if not documents:
             print("No new documents to load")
             exit(0)
@@ -139,12 +140,12 @@ class IngestData:
         return chunks
 
 
-    def build_embeddings(self):
+    def build_embeddings(self, filename):
         """
         Create embeddings and save them in a Chroma vector store
         Returns the indexed db
         """
-        chunks = self.chunk_data()
+        chunks = self.chunk_data(filename)
         print("\n\n\nChunking complete...\n")
         print(f"{len(chunks)} chunks were created.\n")
         print(f"Creating embedding. May take some minutes...")
@@ -189,6 +190,14 @@ class IngestData:
 
             vector_store = FAISS.from_documents(chunks, self.embeddings)
             vector_store.save_local(persist_directory)
+
+            # zip archive the FAISS index files into source directory
+            shutil.make_archive(
+                os.path.join(source_directory, "index_files"),
+                'zip',
+                persist_directory
+            )
+
             # if aws_enable:
             #     self.upload_database(persist_directory, s3_bucket)
             print(f"Ingestion complete!")
