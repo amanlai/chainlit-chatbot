@@ -335,7 +335,7 @@ async def main():
 ########### CREATING A REPLY TO A QUESTION ###############
 ##########################################################
 
-@app.get("/on_message")
+@app.post("/chat")
 @cl.on_message
 async def on_message(msg):
 
@@ -367,7 +367,7 @@ async def on_message(msg):
         content=answer, 
         author=botname
     ).send()
-    return (question, answer)
+    return {"question": question, "answer": answer}
 
 
 # custom endpoints
