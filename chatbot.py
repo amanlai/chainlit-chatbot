@@ -225,6 +225,7 @@ def create_agent(vector_store, temperature, system_message):
 ############## CHAINLIT APP DEFINITION ###################
 ##########################################################
 
+# callback for clicking buttons
 @cl.action_callback("action_button")
 async def on_action(action):
     print("The user clicked on the action button!")
@@ -334,15 +335,16 @@ async def main():
 ########### CREATING A REPLY TO A QUESTION ###############
 ##########################################################
 
+@app.get("/on_message")
 @cl.on_message
-async def on_message(question):
+async def on_message(msg):
 
     # creating a reply
     chat_history = cl.user_session.get('chat_history')
     agent_executor = cl.user_session.get('agent_executor')
-
+    question = msg.content
     result = await agent_executor.ainvoke(
-        {"input": question.content, "chat_history": chat_history}
+        {"input": question, "chat_history": chat_history}
     )
 
     if verbose:
@@ -350,12 +352,10 @@ async def on_message(question):
         print(result)
 
     answer = result['output']
-    print("\n\n\n")
-    print(answer)
-    print("\n\n\n")
+    print(f"\n{answer}\n")
     answer = re.sub("^System: ", "", re.sub("^\\??\n\n", "", answer))
     chat_history.extend(
-        (HumanMessage(content=question.content), AIMessage(content=answer))
+        (HumanMessage(content=question), AIMessage(content=answer))
     )
     cl.user_session.set('chat_history', chat_history)
 
@@ -365,14 +365,20 @@ async def on_message(question):
 
         await cl.Message(
         content=answer, 
-        #elements=process_response(res), 
         author=botname
     ).send()
+    return (question, answer)
 
 
-# Custom Endpoints
+# custom endpoints
 @app.get("/botname")
 def get_botname(request:Request):
     if verbose:
         print(f"calling botname: {botname}")
     return HTMLResponse(botname)
+
+
+# endpoint to verify the API status
+@app.get("/healthcheck")
+async def root():
+    return {"message": "Status: OK"}
