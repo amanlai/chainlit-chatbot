@@ -9,6 +9,7 @@ import chainlit as cl
 from chainlit.server import app
 from fastapi import Request
 from fastapi.responses import HTMLResponse
+from chainlit.context import init_http_context
 import pymongo
 import certifi
 
@@ -29,7 +30,7 @@ from langchain.tools.retriever import create_retriever_tool
 # from langchain_community.vectorstores import Chroma
 from lib.tools import get_tools
 from ingest import IngestData
-
+from utils.password_management import get_hashed_password, check_password
 
 load_dotenv()
 
@@ -50,7 +51,33 @@ use_client = os.environ.get("USE_CLIENT", 'True') == 'True'
 botname = os.environ.get("BOTNAME", "Personal Assistant")
 verbose = os.environ.get("VERBOSE", 'True') == 'True'
 stream = os.environ.get("STREAM", 'True') == 'True'
+databaseName = os.environ.get("DB_NAME", "chattabot")
+username = os.environ.get("DB_USERNAME")
+password = os.environ.get("DB_PASSWORD")
+host = os.environ.get("DB_HOST")
+options = os.environ.get("DB_OPTIONS")
 mongo_uri = os.environ['MONGO_URI']
+user_name = os.environ.get('LOGIN_USERNAME')
+hashed_password = get_hashed_password(os.environ.get("LOGIN_PASSWORD"))
+
+print("\nthe main app is read in.\n")
+
+
+#########################################################
+################# AUTHENTICATION ########################
+#########################################################
+    
+@cl.password_auth_callback
+def auth_callback(user, pw):
+    if user == user_name and check_password(pw, hashed_password):
+        return cl.User(
+            identifier=user_name, 
+            metadata={"role": "admin", "provider": "credentials"}
+        )
+    else:
+        return None
+
+
 
 
 ##########################################################
@@ -64,13 +91,15 @@ def init_connection():
             server_api=pymongo.server_api.ServerApi('1'), 
             tlsCAFile=certifi.where()
         )
-        db = mongo_client['chattabot']
-        collection = db['data']
+        # mongo_uri = f"mongodb://{username}:{password}@{host}/{options}"
+        # mongo_client = pymongo.MongoClient(mongo_uri)
+        # db = mongo_client[databaseName]
+        # collection_names = db.list_collection_names()
         print("Connection to MongoDB successful")
     except pymongo.errors.ConnectionFailure as e:
         print(f"Connection failed: {e}")
         return
-    return collection
+    return mongo_client
 
 
 def ingest_into_collection(collection, business_name, data):
@@ -144,49 +173,50 @@ def build_tools(vector_store, k=5):
 
 def create_agent(vector_store, temperature, system_message):
 
-    sys_msg = f"""You are a helpful assistant. 
-    Respond to the user as helpfully and accurately as possible.
+    sys_msg = (
+        "You are a helpful assistant. "
+        "Respond to the user as helpfully and accurately as possible. "
+        "\n"
+        "It is important that you provide an accurate answer. "
+        "If you're not sure about the details of the query, don't provide an answer; "
+        "ask follow-up questions to have a clear understanding."
+        "\n"
+        "Use the provided tools to perform calculations and lookups related to the "
+        "calendar and datetime computations."
+        "\n"
+        "If you don't have enough context to answer question, "
+        "you should ask user a follow-up question to get needed info. "
+        "\n"
+        "Always use tools if you have follow-up questions to the request or "
+        "if there are questions related to datetime."
+        "\n"
+        """For example, given question: "What time will the restaurant open tomorrow?", """
+        "follow the following steps to answer it:"
+        
+        "  1. Use get_day_of_week tool to find the week day of the data.\n"
+        "  2. Use search_document tool to see if the restaurant is open on that week day.\n"
+        "  3. The restaurant might be closed on specific dates such as a Christmas Day, "
+            "therefore, use get_date tool to find calendar date of the day.\n"
+        "  4. Use search_document tool to see if the restaurant is open on that date.\n"
+        "  5. Generate an answer if possible. If not, ask for clarifications.\n"
+        
 
-    It is important that you provide an accurate answer. 
-    If you're not sure about the details of the query, don't provide an answer; 
-    ask follow-up questions to have a clear understanding.
-
-    Use the provided tools to perform calculations and lookups related to the 
-    calendar and datetime computations.
-
-    If you don't have enough context to answer question, 
-    you should ask user a follow-up question to get needed info. 
-    
-    Always use tools if you have follow-up questions to the request or 
-    if there are questions related to datetime.
-    
-    For example, given question: "What time will the restaurant open tomorrow?", 
-    follow the following steps to answer it:
-    
-      1. Use get_day_of_week tool to find the week day name of tomorrow.
-      2. Use search_document tool to see if the restaurant is open on that week day name.
-      3. The restaurant might be closed on specific dates such as a Christmas Day, 
-         therefore, use get_date tool to find calendar date of tomorrow.
-      4. Use search_document tool to see if the restaurant is open on that date.
-      5. Generate an answer if possible. If not, ask for clarifications.
-    
-
-    Don't make any assumptions about data requests. 
-    For example, if dates are not specified, you ask follow up questions. 
-    There are only two assumptions you can make about a query:
-    
-      1. if the question is about dates but no year is given, 
-         you can assume that the year is {datetime.today().year}.
-      2. if the question includes a weekday, you can assume that 
-         the week is the calendar week that includes the date {datetime.today().strftime('%m-%d-%Y')}.
-
-    Dates should be in the format mm-dd-YYYY.
-    
-    {system_message}
-
-    If you can't find relevant information, instead of making up an answer, 
-    say "Let me connect you to my colleague".
-    """
+        "Don't make any assumptions about data requests. \n"
+        "For example, if dates are not specified, you ask follow up questions. "
+        "There are only two assumptions you can make about a query:\n"
+        
+        "  1. if the question is about dates but no year is given, "
+            f"you can assume that the year is {datetime.today().year}."
+        "  2. if the question includes a weekday, you can assume that "
+            f" the week is the calendar week that includes the date {datetime.today().strftime('%m-%d-%Y')}."
+        "\n"
+        "Dates should be in the format mm-dd-YYYY.\n"
+        "\n"
+        f"{system_message}"
+        "\n"
+        "If you can't find relevant information, instead of making up an answer, "
+        """say "Let me connect you to my colleague"."""
+    )
 
     llm = ChatOpenAI(model=model_name, temperature=temperature)
     tools = build_tools(vector_store)
@@ -242,6 +272,21 @@ async def main():
     system_message = ""
     temperature = 0
 
+    # initiate mongodb connection
+    conn = init_connection()
+    db = conn[databaseName]
+    collection = db['data']
+
+    # process business type
+    bus_res = await cl.AskUserMessage(
+        content="Which business are you going to ask about today?", 
+    ).send()
+
+    try:
+        business_name = bus_res.get('output')
+    except KeyError:
+        cl.Text("must supply business name")
+
     # process file ingestion
     response = await cl.AskActionMessage(
         content="Do you want to use previously uploaded file or do you want to a new file?", 
@@ -269,17 +314,6 @@ async def main():
             pdf_file = files[0].path
             vector_store = data_processor.build_embeddings(pdf_file)
 
-    # process business type
-    bus_res = await cl.AskUserMessage(
-        content="Which business are you going to ask about today?", 
-    ).send()
-
-    try:
-        business_name = bus_res.get('output')
-    except KeyError:
-        cl.Text("must supply business name")
-
-
     db_res = await cl.AskActionMessage(
         content="Do you want to use previous configurations or do you want to create a new one?", 
         actions=[
@@ -289,12 +323,24 @@ async def main():
     ).send()
 
     if db_res:
-        # initiate mongodb connection
-        collection = init_connection()
         # path to archived index files
         path = os.path.join(source_directory, "index_files.zip")
 
         if db_res.get("value") == "new_config":
+
+            # ask for system message, message_prompt, temperature
+
+            sys_msg = await cl.AskUserMessage(
+                content="System message:", 
+            ).send()
+            
+            temp = await cl.AskUserMessage(
+                content="Temperature:", 
+            ).send()
+
+            system_message = sys_msg['output']
+            temperature = float(temp['output'])
+
             # if beginning from scratch
             data = {
                 "message_prompt": message_prompt,
@@ -329,20 +375,19 @@ async def main():
     cl.user_session.set('chat_history', [])
     create_agent(vector_store, temperature, system_message)
 
+    # close db connection
+    conn.close()
+
 
 
 ##########################################################
 ########### CREATING A REPLY TO A QUESTION ###############
 ##########################################################
 
-@app.post("/chat")
-@cl.on_message
-async def on_message(msg):
+async def create_answer(question):
 
-    # creating a reply
     chat_history = cl.user_session.get('chat_history')
     agent_executor = cl.user_session.get('agent_executor')
-    question = msg.content
     result = await agent_executor.ainvoke(
         {"input": question, "chat_history": chat_history}
     )
@@ -352,27 +397,38 @@ async def on_message(msg):
         print(result)
 
     answer = result['output']
-    print(f"\n{answer}\n")
+
+    if verbose:
+        print(f"\n{answer}\n")
+
     answer = re.sub("^System: ", "", re.sub("^\\??\n\n", "", answer))
     chat_history.extend(
         (HumanMessage(content=question), AIMessage(content=answer))
     )
     cl.user_session.set('chat_history', chat_history)
+    return answer
 
-    if verbose:
-        print("main")
-        print(f"result: {answer}")
 
-        await cl.Message(
+@cl.on_message
+async def on_message(msg):
+
+    # creating a reply
+    question = msg.content
+    answer = await create_answer(question)
+
+    await cl.Message(
         content=answer, 
         author=botname
     ).send()
-    return {"question": question, "answer": answer}
 
+
+##########################################################
+##################### API ENDPOINTS ######################
+##########################################################
 
 # custom endpoints
 @app.get("/botname")
-def get_botname(request:Request):
+def get_botname(request: Request):
     if verbose:
         print(f"calling botname: {botname}")
     return HTMLResponse(botname)
@@ -382,3 +438,22 @@ def get_botname(request:Request):
 @app.get("/healthcheck")
 async def root():
     return {"message": "Status: OK"}
+
+
+# endpoint to show last message
+@app.get("/lastchat")
+async def get_lastchat(request: Request):
+
+    init_http_context()
+    
+    chat_history = cl.user_session.get('chat_history')
+    
+    if chat_history is not None:
+        question, answer = chat_history[-1]
+        return {
+            "message": "OK", 
+            "question": question, 
+            "answer": answer
+        }
+    else:
+        return {"message": "no chat history"}
