@@ -164,3 +164,4 @@ docs/*.pdf
 db/*
 !db/.keep
 New Folder/
+flask_app/
