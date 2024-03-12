@@ -17,3 +17,5 @@ tqdm==4.66.1
 pymongo==4.6.1
 faiss-cpu==1.7.4
 # faiss-gpu
+packaging==23.2
+twilio==9.0.0
