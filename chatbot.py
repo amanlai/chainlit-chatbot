@@ -11,15 +11,12 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 from twilio.http.async_http_client import AsyncTwilioHttpClient
 from lib.agents import get_agent_executor
-from utils.ingest import IngestData
 from utils.mongo_utils import init_connection
-from utils.helpers import get_message, get_action, get_file
-from utils.mongo_utils import mongodb_interaction
+from utils.helpers import get_user_input
+from utils.mongo_utils import prepare_training_data
 from utils.password_management import get_hashed_password, check_password
 load_dotenv()
 
-database_type = os.environ.get("VECTOR_STORE_TYPE", "faiss")
-database_name = os.environ.get("DB_NAME", "chattabot")
 user_name = os.environ.get('LOGIN_USERNAME')
 hashed_password = get_hashed_password(os.environ.get("LOGIN_PASSWORD"))
 botname = os.environ.get("BOTNAME", "Personal Assistant")
@@ -63,38 +60,15 @@ async def main():
 
     """ Startup """
 
-    msg_pmpt = "Ask me anything!"
-    sys_mg = ""
-    t = 0
-    vs = None
     # initiate mongodb connection
     conn = await init_connection()
-    db = conn[database_name]
-
-    # process business type
-    name = await get_message("Which business are you going to ask about today?")
-    # process file ingestion
-    response = await get_action("Do you want to use previously uploaded file or do you want to a new file?")
-    # process the response
-    if response:
-        # instantialize data ingester / getter
-        dp = IngestData(database_type=database_type)
-
-        if response == "new":
-            files = None
-            # Wait for the user to upload a file
-            while files is None:
-                files = await get_file("Please upload a pdf file!")
-            pdf_file = files[0].path
-            vs = dp.build_embeddings(pdf_file)
-
-    db_res = await get_action("Do you want to use previous configurations or do you want to create a new one?")
     
-    if db_res:
-        vs, msg_pmpt, sys_mg, t = await mongodb_interaction(db_res, db, name, msg_pmpt, dp, vs)
-        
-    # saving the vector store in a user session
-    cl.user_session.set('vector_store', vs)
+    # get user input
+    name, response, db_res = await get_user_input()
+    vs, msg_pmpt, sys_mg, t = await prepare_training_data(name, response, db_res, conn)
+
+    # # saving the vector store in a user session
+    # cl.user_session.set('vector_store', vs)
 
     # wait for user question
     await cl.Avatar(name=botname, path="./public/logo_dark.png").send()
@@ -159,12 +133,6 @@ def get_botname(request: Request):
     return HTMLResponse(botname)
 
 
-# endpoint to verify the API status
-@app.get("/healthcheck")
-async def root():
-    return {"message": "Status: OK"}
-
-
 async def send_sms(message, to_phone_number):
     """ Send SMS text message and return the message id """
     http_client = AsyncTwilioHttpClient()
@@ -198,6 +166,14 @@ async def chat(request: Request):
     print(f"Message status: {mstatus}; message SID: {msid}\n")
 
     return {"status": "OK", "content": str(response), "answer": answer, "question": question}
+
+
+@app.get("/lastchat")
+async def lastchat(request: Request):
+    init_http_context()
+    question = "Is the pool open?"
+    answer = await create_answer(question)
+    return {"answer": answer, "question": question}
 
 
 if __name__ == "__main__":

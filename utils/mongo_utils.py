@@ -3,13 +3,15 @@ import io
 import zipfile
 import pymongo
 import certifi
-from .helpers import get_message
+from .ingest import IngestData
+from .helpers import get_message, get_file
 
 # MongoDB config
 mongo_uri = os.environ.get("MONGO_URI")
 persist_directory = os.environ.get("PERSIST_DIRECTORY", "../db")
 source_directory = os.environ.get("DOCUMENT_SOURCE_DIR", "../docs")
-
+database_type = os.environ.get("VECTOR_STORE_TYPE", "faiss")
+database_name = os.environ.get("DB_NAME", "chattabot")
 
 async def init_connection():
     try:
@@ -67,6 +69,7 @@ async def copy_from_collection(
     else:
         return vector_store
 
+
 async def mongodb_interaction(
         db_res, db, business_name, message_prompt, data_processor, vector_store
 ):
@@ -103,3 +106,32 @@ async def mongodb_interaction(
         else:
             ValueError("New files do not have previous configurations.")
     return vector_store, message_prompt, system_message, temperature
+
+
+async def index_documents(response):
+    """
+    Chunk and index newly uploaded file
+    """
+    # instantialize data ingester / getter
+    dp = IngestData(database_type=database_type)
+    vs = None
+    if response == "new":
+        files = None
+        # Wait for the user to upload a file
+        while files is None:
+            files = await get_file("Please upload a pdf file!")
+        pdf_file = files[0].path
+        vs = dp.build_embeddings(pdf_file)
+    return dp, vs
+
+
+async def prepare_training_data(name, response, db_res, conn):
+
+    db = conn[database_name]
+    vs = None
+    msg_pmpt = "Ask me anything!"
+    sys_mg = ""
+    t = 0
+    dp, vs = await index_documents(response)
+    vs, msg_pmpt, sys_mg, t = await mongodb_interaction(db_res, db, name, msg_pmpt, dp, vs)
+    return vs, msg_pmpt, sys_mg, t
