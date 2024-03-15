@@ -2,24 +2,19 @@
 import os
 import glob
 import shutil
-# import boto3
-# from multiprocessing import Pool
-from tqdm import tqdm
 from dotenv import load_dotenv
 import uuid
-from langchain_community.document_loaders import PyPDFLoader#, PyMuPDFLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma, FAISS
 from langchain_openai import OpenAIEmbeddings
 import chromadb
 from chromadb.config import Settings
-
-
 load_dotenv()
 
 # Load environment variables
-persist_directory = os.environ.get("PERSIST_DIRECTORY", 'db')
-source_directory = os.environ.get("DOCUMENT_SOURCE_DIR", 'docs')
+persist_directory = os.environ.get("PERSIST_DIRECTORY", '../db')
+source_directory = os.environ.get("DOCUMENT_SOURCE_DIR", '../docs')
 verbose = os.environ.get("VERBOSE", 'True').lower() in ('true', '1', 't')
 # aws
 aws_enable = os.environ.get("AWS_ENABLE", 'False').lower() in ('true', '1', 't')

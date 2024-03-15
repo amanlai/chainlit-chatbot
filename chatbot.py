@@ -1,266 +1,61 @@
 import os
 import re
-import io
-import zipfile
-from datetime import datetime
 from dotenv import load_dotenv
-
+from langchain_core.messages import AIMessage, HumanMessage
 import chainlit as cl
 from chainlit.server import app
+from chainlit.context import init_http_context
 from fastapi import Request
 from fastapi.responses import HTMLResponse
-from chainlit.context import init_http_context
-import pymongo
-import certifi
-
-
-from langchain_community.chat_models import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.agents import tool, AgentExecutor, create_openai_tools_agent
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain.tools.retriever import create_retriever_tool
-# from langchain_community.vectorstores import Chroma
-# from langchain.prompts import ChatPromptTemplate#, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-# (from langchain.agents.agent_toolkits.conversational_retrieval.openai_functions 
-#  import create_conversational_retrieval_agent)
-# from langchain.chains import ConversationalRetrievalChain
-# from langchain.agents.format_scratchpad import format_to_openai_function_messages
-# from langchain.agents.output_parsers import OpenAIFunctionsAgentOutputParser
-# from langchain_community.tools.convert_to_openai import format_tool_to_openai_function
-# from langchain_community.vectorstores import Chroma
-from lib.tools import get_tools
-from ingest import IngestData
+from twilio.twiml.messaging_response import MessagingResponse
+from twilio.rest import Client
+from twilio.http.async_http_client import AsyncTwilioHttpClient
+from lib.agents import get_agent_executor
+from utils.ingest import IngestData
+from utils.mongo_utils import init_connection
+from utils.helpers import get_message, get_action, get_file
+from utils.mongo_utils import mongodb_interaction
 from utils.password_management import get_hashed_password, check_password
-
 load_dotenv()
 
-# SYSTEM_TEMPLATE = (
-#     "You are a helpful bot. "
-#     "If you do not know the answer, just say that you do not know, do not try to make up an answer."
-# )
-persist_directory = os.environ.get("PERSIST_DIRECTORY", 'db')
-source_directory = os.environ.get("DOCUMENT_SOURCE_DIR", 'docs')
-
-database_type = 'faiss'
-
-os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY', 'dummy_key')
-
-model_name = os.environ.get("MODEL_NAME", 'gpt-3.5-turbo')
-use_client = os.environ.get("USE_CLIENT", 'True') == 'True'
-
-botname = os.environ.get("BOTNAME", "Personal Assistant")
-verbose = os.environ.get("VERBOSE", 'True') == 'True'
-stream = os.environ.get("STREAM", 'True') == 'True'
-databaseName = os.environ.get("DB_NAME", "chattabot")
-username = os.environ.get("DB_USERNAME")
-password = os.environ.get("DB_PASSWORD")
-host = os.environ.get("DB_HOST")
-options = os.environ.get("DB_OPTIONS")
-mongo_uri = os.environ['MONGO_URI']
+database_type = os.environ.get("VECTOR_STORE_TYPE", "faiss")
+database_name = os.environ.get("DB_NAME", "chattabot")
 user_name = os.environ.get('LOGIN_USERNAME')
 hashed_password = get_hashed_password(os.environ.get("LOGIN_PASSWORD"))
+botname = os.environ.get("BOTNAME", "Personal Assistant")
+verbose = os.environ.get("VERBOSE", 'True') == 'True'
+port = int(os.getenv("PORT", 8000))
 
-print("\nthe main app is read in.\n")
-
+# twilio config
+account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+from_phone = os.getenv("TWILIO_PHONE")
 
 #########################################################
 ################# AUTHENTICATION ########################
 #########################################################
-    
+
 @cl.password_auth_callback
 def auth_callback(user, pw):
     if user == user_name and check_password(pw, hashed_password):
         return cl.User(
-            identifier=user_name, 
+            identifier=user_name,
             metadata={"role": "admin", "provider": "credentials"}
         )
     else:
         return None
 
 
-
-
-##########################################################
-############### MONGODB CONNECTION #######################
-##########################################################
-
-def init_connection():
-    try:
-        mongo_client = pymongo.MongoClient(
-            mongo_uri, 
-            server_api=pymongo.server_api.ServerApi('1'), 
-            tlsCAFile=certifi.where()
-        )
-        # mongo_uri = f"mongodb://{username}:{password}@{host}/{options}"
-        # mongo_client = pymongo.MongoClient(mongo_uri)
-        # db = mongo_client[databaseName]
-        # collection_names = db.list_collection_names()
-        print("Connection to MongoDB successful")
-    except pymongo.errors.ConnectionFailure as e:
-        print(f"Connection failed: {e}")
-        return
-    return mongo_client
-
-
-def ingest_into_collection(collection, business_name, data):
-    """
-    Ingest data into MongoDB
-    """
-    collection.delete_one({'_id': business_name})
-    collection.insert_one({"_id": business_name, **data})
-
-
-def update_collection(collection, business_name, data):
-    """
-    Update certain key-value pairs in documents in a collection
-    """
-    collection.update_one(
-        {'_id': business_name}, 
-        {"$set": data}
-    )
-
-
-def copy_from_collection(
-        data_processor, 
-        collection, 
-        business_name, 
-        old_config=False
-):
-    # get dictionary of attributes from MongoDB
-    data = next(collection.find({'_id': business_name}))
-    # read the archived index files from mongodb into a binary stream
-    index_files = io.BytesIO(data.get("index_files"))
-    # extract the index files into the persist directory
-    with zipfile.ZipFile(index_files) as zip_file:
-        zip_file.extractall(persist_directory)
-    # now that we have the index files stored in persist directory
-    # we can get the vector stores from them
-    vector_store = data_processor.get_vector_store()
-    if old_config:
-        message_prompt = data.get("message_prompt", 'Ask me anything!')
-        system_message = data.get("system_message", "")
-        temperature = data.get("temperature", 0)
-        return vector_store, message_prompt, system_message, temperature
-    else:
-        return vector_store
-
-
-
-
-##########################################################
-############ AGENT AND TOOL DEFINITION ###################
-##########################################################
-
-def build_tools(vector_store, k=5):
-    """
-    Creates the list of tools to be used by the Agent Executor
-    """
-    retriever = vector_store.as_retriever(
-        search_type="similarity", 
-        search_kwargs={"k": k}
-    )
-
-    retriever_tool = create_retriever_tool(
-        retriever,
-        "search_document",
-        """Searches and retrieves information from the vector store """
-        """to answer questions whose answers can be found there.""",
-    )
-
-    tools = [*get_tools(), retriever_tool]
-    return tools
-
-
-def create_agent(vector_store, temperature, system_message):
-
-    sys_msg = (
-        "You are a helpful assistant. "
-        "Respond to the user as helpfully and accurately as possible. "
-        "\n"
-        "It is important that you provide an accurate answer. "
-        "If you're not sure about the details of the query, don't provide an answer; "
-        "ask follow-up questions to have a clear understanding."
-        "\n"
-        "Use the provided tools to perform calculations and lookups related to the "
-        "calendar and datetime computations."
-        "\n"
-        "If you don't have enough context to answer question, "
-        "you should ask user a follow-up question to get needed info. "
-        "\n"
-        "Always use tools if you have follow-up questions to the request or "
-        "if there are questions related to datetime."
-        "\n"
-        """For example, given question: "What time will the restaurant open tomorrow?", """
-        "follow the following steps to answer it:"
-        
-        "  1. Use get_day_of_week tool to find the week day of the data.\n"
-        "  2. Use search_document tool to see if the restaurant is open on that week day.\n"
-        "  3. The restaurant might be closed on specific dates such as a Christmas Day, "
-            "therefore, use get_date tool to find calendar date of the day.\n"
-        "  4. Use search_document tool to see if the restaurant is open on that date.\n"
-        "  5. Generate an answer if possible. If not, ask for clarifications.\n"
-        
-
-        "Don't make any assumptions about data requests. \n"
-        "For example, if dates are not specified, you ask follow up questions. "
-        "There are only two assumptions you can make about a query:\n"
-        
-        "  1. if the question is about dates but no year is given, "
-            f"you can assume that the year is {datetime.today().year}."
-        "  2. if the question includes a weekday, you can assume that "
-            f" the week is the calendar week that includes the date {datetime.today().strftime('%m-%d-%Y')}."
-        "\n"
-        "Dates should be in the format mm-dd-YYYY.\n"
-        "\n"
-        f"{system_message}"
-        "\n"
-        "If you can't find relevant information, instead of making up an answer, "
-        """say "Let me connect you to my colleague"."""
-    )
-
-    llm = ChatOpenAI(model=model_name, temperature=temperature)
-    tools = build_tools(vector_store)
-
-    # system_message = SystemMessage(content=sys_msg)
-    # agent_executor = create_conversational_retrieval_agent(
-    #     llm=llm, 
-    #     tools=tools, 
-    #     system_message=system_message,
-    #     verbose=True, 
-    #     max_token_limit=200
-    # )
-
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", sys_msg),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("user", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ]
-    )
-    agent = create_openai_tools_agent(llm, tools, prompt)
-    agent_executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=verbose,
-        max_iterations=10,
-        handle_parsing_errors=True,
-        early_stopping_method = 'generate',
-        callbacks=[cl.AsyncLangchainCallbackHandler(stream_final_answer=stream)]
-    )
+async def create_agent(vs, temp, sys_msg):
+    global agent_executor_global
+    agent_executor = await get_agent_executor(vs, temp, sys_msg)
     cl.user_session.set('agent_executor', agent_executor)
+    agent_executor_global = agent_executor
 
 
 ##########################################################
 ############## CHAINLIT APP DEFINITION ###################
 ##########################################################
-
-# callback for clicking buttons
-@cl.action_callback("action_button")
-async def on_action(action):
-    print("The user clicked on the action button!")
-    return action
-
 
 # App Hooks
 @cl.on_chat_start
@@ -268,112 +63,47 @@ async def main():
 
     """ Startup """
 
-    message_prompt = "Ask me anything!"
-    system_message = ""
-    temperature = 0
-
+    msg_pmpt = "Ask me anything!"
+    sys_mg = ""
+    t = 0
+    vs = None
     # initiate mongodb connection
-    conn = init_connection()
-    db = conn[databaseName]
-    collection = db['data']
+    conn = await init_connection()
+    db = conn[database_name]
 
     # process business type
-    bus_res = await cl.AskUserMessage(
-        content="Which business are you going to ask about today?", 
-    ).send()
-
-    try:
-        business_name = bus_res.get('output')
-    except KeyError:
-        cl.Text("must supply business name")
-
+    name = await get_message("Which business are you going to ask about today?")
     # process file ingestion
-    response = await cl.AskActionMessage(
-        content="Do you want to use previously uploaded file or do you want to a new file?", 
-        actions=[
-            cl.Action(name="Use previous file", value="old_file"),
-            cl.Action(name="Use new file", value="new_file")
-        ]
-    ).send()
-
+    response = await get_action("Do you want to use previously uploaded file or do you want to a new file?")
     # process the response
     if response:
         # instantialize data ingester / getter
-        data_processor = IngestData(database_type=database_type)
-        vector_store = None
+        dp = IngestData(database_type=database_type)
 
-        if response.get("value") == "new_file":
-
+        if response == "new":
             files = None
             # Wait for the user to upload a file
             while files is None:
-                files = await cl.AskFileMessage(
-                    content="Please upload a pdf file!", accept=["application/pdf"]
-                ).send()
-
+                files = await get_file("Please upload a pdf file!")
             pdf_file = files[0].path
-            vector_store = data_processor.build_embeddings(pdf_file)
+            vs = dp.build_embeddings(pdf_file)
 
-    db_res = await cl.AskActionMessage(
-        content="Do you want to use previous configurations or do you want to create a new one?", 
-        actions=[
-            cl.Action(name="Use previous configurations", value="old_config"),
-            cl.Action(name="Create new configurations", value="new_config")
-        ]
-    ).send()
-
+    db_res = await get_action("Do you want to use previous configurations or do you want to create a new one?")
+    
     if db_res:
-        # path to archived index files
-        path = os.path.join(source_directory, "index_files.zip")
-
-        if db_res.get("value") == "new_config":
-
-            # ask for system message, message_prompt, temperature
-
-            sys_msg = await cl.AskUserMessage(
-                content="System message:", 
-            ).send()
-            
-            temp = await cl.AskUserMessage(
-                content="Temperature:", 
-            ).send()
-
-            system_message = sys_msg['output']
-            temperature = float(temp['output'])
-
-            # if beginning from scratch
-            data = {
-                "message_prompt": message_prompt,
-                "system_message": system_message,
-                "temperature": temperature,
-            }
-            try:
-                # save the archived index files into mongodb
-                with open(path, 'rb') as f:
-                    index_files = f.read()
-                os.remove(path)
-                # add the index files into the basic configuration
-                data |= {"index_files": index_files}
-                ingest_into_collection(collection, business_name, data)
-            except FileNotFoundError:
-                update_collection(collection, business_name, data)
-                vector_store = copy_from_collection(data_processor, collection, business_name)
-        else:
-            if vector_store is None:
-                tpl = copy_from_collection(data_processor, collection, business_name, old_config=True)
-                vector_store, message_prompt, system_message, temperature = tpl
-            else:
-                ValueError("New files do not have previous configurations.")
-
-    # saving the vector store in the streamlit session state (to be persistent between reruns)
-    cl.user_session.set('vector_store', vector_store)
+        vs, msg_pmpt, sys_mg, t = await mongodb_interaction(db_res, db, name, msg_pmpt, dp, vs)
+        
+    # saving the vector store in a user session
+    cl.user_session.set('vector_store', vs)
 
     # wait for user question
     await cl.Avatar(name=botname, path="./public/logo_dark.png").send()
-    await cl.Message(content=message_prompt, author=botname).send()
+    await cl.Message(content=msg_pmpt, author=botname).send()
 
+    global chat_history_global
+    chat_history_global = []
     cl.user_session.set('chat_history', [])
-    create_agent(vector_store, temperature, system_message)
+    await create_agent(vs, t, sys_mg)
 
     # close db connection
     conn.close()
@@ -386,40 +116,34 @@ async def main():
 
 async def create_answer(question):
 
-    chat_history = cl.user_session.get('chat_history')
-    agent_executor = cl.user_session.get('agent_executor')
+    global agent_executor_global
+    global chat_history_global
+    chat_history = cl.user_session.get('chat_history', chat_history_global)
+    agent_executor = cl.user_session.get('agent_executor', agent_executor_global)
     result = await agent_executor.ainvoke(
         {"input": question, "chat_history": chat_history}
     )
-
-    if verbose:
-        print("This is the result of the chain:")
-        print(result)
-
     answer = result['output']
-
-    if verbose:
-        print(f"\n{answer}\n")
-
     answer = re.sub("^System: ", "", re.sub("^\\??\n\n", "", answer))
     chat_history.extend(
         (HumanMessage(content=question), AIMessage(content=answer))
     )
     cl.user_session.set('chat_history', chat_history)
+    chat_history_global = chat_history
     return answer
 
 
-@cl.on_message
-async def on_message(msg):
+# @cl.on_message
+# async def on_message(msg):
 
-    # creating a reply
-    question = msg.content
-    answer = await create_answer(question)
+#     # creating a reply
+#     question = msg.content
+#     answer = await create_answer(question)
 
-    await cl.Message(
-        content=answer, 
-        author=botname
-    ).send()
+#     await cl.Message(
+#         content=answer,
+#         author=botname
+#     ).send()
 
 
 ##########################################################
@@ -429,6 +153,7 @@ async def on_message(msg):
 # custom endpoints
 @app.get("/botname")
 def get_botname(request: Request):
+    print(request)
     if verbose:
         print(f"calling botname: {botname}")
     return HTMLResponse(botname)
@@ -440,20 +165,40 @@ async def root():
     return {"message": "Status: OK"}
 
 
-# endpoint to show last message
-@app.get("/lastchat")
-async def get_lastchat(request: Request):
+async def send_sms(message, to_phone_number):
+    """ Send SMS text message and return the message id """
+    http_client = AsyncTwilioHttpClient()
+    client = Client(account_sid, auth_token, http_client=http_client)
+    message = await client.messages.create_async(
+        body=message,
+        from_=from_phone,
+        to=to_phone_number
+    )
+    return message.status, message.sid
 
+
+@app.post("/sms")
+async def chat(request: Request):
+    """Respond to incoming calls with a simple text message."""
+    
     init_http_context()
     
-    chat_history = cl.user_session.get('chat_history')
-    
-    if chat_history is not None:
-        question, answer = chat_history[-1]
-        return {
-            "message": "OK", 
-            "question": question, 
-            "answer": answer
-        }
-    else:
-        return {"message": "no chat history"}
+    response = MessagingResponse()
+
+    # receive question in SMS
+    fm = await request.form()
+    to_phone_number = fm.get("From")
+    question = fm.get("Body")
+
+    # creating a reply
+    answer = await create_answer(question)
+    response.message(answer)
+    mstatus, msid = await send_sms(answer, to_phone_number)
+    print(f'Sending the answer: "{answer}" from {from_phone} to {to_phone_number}.')
+    print(f"Message status: {mstatus}; message SID: {msid}\n")
+
+    return {"status": "OK", "content": str(response), "answer": answer, "question": question}
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=port)
